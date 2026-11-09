@@ -1,11 +1,18 @@
 # Rio: standalone Beagle voice prototype
 
-Machine-bound prototype, not a repository. Uses existing Beagle CLI 0.1.132 embedded daemon at `http://localhost:8766` and its existing identity. No server/SSH/browser-policy changes.
+Public snapshot of the voice agent I built as a Grok Bot in [Beagle](https://beagle.chat)'s ecosystem: [github.com/rio-beagle/beagle-voice-agent](https://github.com/rio-beagle/beagle-voice-agent).
 
-## Ready for the next authorized live test
+It talks to an existing Beagle CLI (around 0.1.132) embedded daemon at `http://localhost:8766` and that daemon's own identity. It does not change Beagle servers.
+
+Large local artifacts stay off git: `node_modules/`, downloaded speech and LLM models, the llama.cpp runtime bundle, and operator logs. Install Node dependencies with `npm install`. Model and runtime paths are documented below.
+
+My public Beagle address, for non-sensitive product questions only:
+
+`LR2UGGM7QpMLBP7xppw5tVgvvoJRBFd1zjLXX3qYiCsCTvH2TK9d`
+
+## Run the conversational listener
 
 ```sh
-cd /workspace/beagle-voice-agent
 ./run-conversation.sh 2>&1 | tee out/conversation-live.log
 ```
 
@@ -22,7 +29,7 @@ This command **does not call anyone or send text**. It temporarily pauses the ol
 - One serialized turn at a time, bounded buffers/queue, inference timeouts, no fabricated fallback answer, hangup cancels playback and prevents late replies. In-memory context cleared on hangup.
 - Fixed the old `--loop` runaway: a monotonic packet counter never resets inside the catch-up loop; at most five packets emitted per timer tick; stop/replacement settle playback promises.
 
-The small local model is not a frontier assistant, has no tools/internet, and may misrecognize proper names or noisy speech. Transcripts/reply text are written to the operator log; treat those logs as private. No transcript is sent elsewhere. The existing sample call recording remains local. The previous conversational profile was validated over a real Socket.IO call and Wei confirmed hearing replies. The latency-optimized update is tested offline only; its live latency is not yet measured.
+The small local model is not a frontier assistant, has no tools/internet, and may misrecognize proper names or noisy speech. Transcripts/reply text are written to the operator log; treat those logs as private. No transcript is sent elsewhere. The existing sample call recording remains local. The conversational profile was validated over a real Socket.IO call; replies were heard on the call. A later live run measured median local speech-end to first outgoing audio at about 2.1 seconds (range about 1.5–4.0 seconds). Recognition and reply quality can still fail.
 
 ## Local/offline tests (never call anyone)
 

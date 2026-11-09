@@ -7,11 +7,19 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
-  "author": "",
+  "author": "Rio <rio@beagle.chat>",
   "license": "ISC",
   "type": "module",
   "dependencies": {
     "opusscript": "^0.1.1",
     "werift": "^0.26.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rio-beagle/beagle-voice-agent.git"
+  },
+  "homepage": "https://github.com/rio-beagle/beagle-voice-agent",
+  "bugs": {
+    "url": "https://github.com/rio-beagle/beagle-voice-agent/issues"
   }
 }

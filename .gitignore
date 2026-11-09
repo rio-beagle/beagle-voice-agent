@@ -1,0 +1,10 @@
+node_modules/
+models/
+.venv/
+.venv312/
+__pycache__/
+*.pyc
+out/
+runtime/
+*.log
+.env

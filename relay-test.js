@@ -1,0 +1,31 @@
+// Local relay-only media test: two werift peers in one process, both via the same TURN server.
+import { fetchRelayIceServers } from './lib/ice.js';
+import { relayOnlyPeerConnectionFactory, makeAudioSource } from './lib/engine.js';
+import { fileToOpusPackets, oggToWav } from './lib/audio.js';
+import { OggOpusWriter } from './lib/ogg.js';
+import { execFileSync } from 'node:child_process';
+const host = process.argv[2] || '13.58.208.50';
+const { relay } = await fetchRelayIceServers('http://localhost:8766', host, { allowTcp: false });
+console.log('using', relay[0].urls); // URL only, never credentials
+const log = (who) => (...a) => console.log(who, ...a);
+const A = relayOnlyPeerConnectionFactory(relay, log('A'))(), B = relayOnlyPeerConnectionFactory(relay, log('B'))();
+const candTypes = { A: [], B: [] };
+A.onicecandidate = (e) => { if (e.candidate) { candTypes.A.push(e.candidate.candidate); B.addIceCandidate(e.candidate); } };
+B.onicecandidate = (e) => { if (e.candidate) { candTypes.B.push(e.candidate.candidate); A.addIceCandidate(e.candidate); } };
+const src = makeAudioSource(); A.addTrack(src.track, src.stream);
+const w = new OggOpusWriter('out/relay-test.ogg'); let n = 0;
+B.onTrack.subscribe((t) => t.onReceiveRtp.subscribe((rtp) => { n++; w.write(rtp.payload); }));
+B.addTransceiver('audio', { direction: 'recvonly' });
+await A.setLocalDescription(await A.createOffer()); await B.setRemoteDescription(A.localDescription);
+await B.setLocalDescription(await B.createAnswer()); await A.setRemoteDescription(B.localDescription);
+const to = setTimeout(() => { console.log('FAIL: no connection in 30s', A.connectionState, B.connectionState); process.exit(2); }, 30000);
+await new Promise((r) => A.connectionStateChange.subscribe((s) => s === 'connected' && r()));
+clearTimeout(to); console.log('connected; pair via relay');
+const pk = fileToOpusPackets('/workspace/beagle-call/greeting.wav');
+await src.play(pk); await new Promise((r) => setTimeout(r, 1500));
+w.close(); oggToWav('out/relay-test.ogg', 'out/relay-test.wav');
+const dur = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', 'out/relay-test.wav']).toString().trim();
+const vol = execFileSync('ffmpeg', ['-i', 'out/relay-test.wav', '-af', 'volumedetect', '-f', 'null', '-'], { stdio: ['ignore', 'pipe', 'pipe'] }).toString();
+console.log(`sent ${pk.length} frames, B received ${n} RTP packets, wav ${dur}s`);
+console.log('nonrelay cands seen:', [...candTypes.A, ...candTypes.B].filter(c => !/ typ relay\b/.test(c)).length);
+await A.close(); await B.close(); process.exit(n > pk.length * 0.8 ? 0 : 3);

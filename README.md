@@ -21,8 +21,8 @@ This command **does not call anyone or send text**. It temporarily pauses the ol
 ## Actual implementation
 
 - Existing werift/peer-webrtc signaling and **relay-only UDP TURN** retained. STUN/host/direct peer candidates are not used. TCP entries are fallbacks in the config; werift uses the selected first relay.
-- Remote Opus RTP decoded locally with `opusscript`, downmixed/resampled to 16 kHz PCM.
-- Bounded energy VAD: 200 ms pre-roll, 240 ms minimum voiced audio, 450 ms silence endpoint, 12 s maximum turn. A wall-clock timer also handles RTP/DTX gaps. This is an energy gate, not a neural speech classifier.
+- Remote Opus RTP decoded locally with `opusscript` (48 kHz stereo), downmixed and low-pass decimated to 16 kHz mono in `lib/resample.js`. (Before 2026-11-10 the downmix produced 8 kHz audio labelled 16 kHz, i.e. 2x-speed speech: the main cause of empty and looping transcripts.)
+- Bounded energy VAD with adaptive noise floor: 200 ms pre-roll, 240 ms minimum voiced audio, 300 ms silence endpoint, 12 s maximum turn. A wall-clock timer also handles RTP/DTX gaps. This is an energy gate, not a neural speech classifier.
 - Persistent local CPU worker: multilingual faster-whisper **base**, Qwen2.5 **1.5B Instruct Q4_K_M** through official llama.cpp CPU runtime, and local Piper English/Chinese voices. No API keys, new accounts, paid inference, or cloud upload of call audio.
 - ASR language autodetection (English/Chinese), last four conversational exchanges supplied to the LLM, replies capped at two sentences/250 characters, local WAV -> in-process Opus (ffmpeg fallback) -> same call's outgoing RTP track.
 - Intentionally **half duplex**: incoming audio is discarded while thinking/speaking and for 800 ms afterwards. This prevents reply/echo feedback loops but **does not support barge-in or true acoustic echo cancellation**. Raw Opus decoder state is preserved while gated.
@@ -30,6 +30,21 @@ This command **does not call anyone or send text**. It temporarily pauses the ol
 - Fixed the old `--loop` runaway: a monotonic packet counter never resets inside the catch-up loop; at most five packets emitted per timer tick; stop/replacement settle playback promises.
 
 The small local model is not a frontier assistant, has no tools/internet, and may misrecognize proper names or noisy speech. Transcripts/reply text are written to the operator log; treat those logs as private. No transcript is sent elsewhere. The existing sample call recording remains local. The conversational profile was validated over a real Socket.IO call; replies were heard on the call. A later live run measured median local speech-end to first outgoing audio at about 2.1 seconds (range about 1.5–4.0 seconds). Recognition and reply quality can still fail.
+
+## 2026-11-10 ASR / reply / latency update
+
+- ASR (`asr_filters.py`): near-silent turns skipped before ASR, bounded clip-safe gain to about -22 dBFS, single-encoder bilingual decode (`multilingual=True`), temperature fallback with compression-ratio threshold, length-bounded `max_new_tokens`, repeated-phrase collapse, and transcripts that are mostly repeats are dropped.
+- Replies (`reply_policy.py`): greetings, thanks, bye, acknowledgements and "can you hear me" get short natural replies; only clearly unrelated requests get the short Beagle-only redirect; everything else goes to the grounded local model. Echoed questions are suppressed.
+- Streaming: the worker streams LLM tokens, synthesizes the first clause and sends it as a partial; Node encodes and plays clauses back to back.
+- Text auto-reply (`lib/text-autoreply.js`): accepted friends only, messages arriving after start only, never its own messages, agents (Decent HQ, muse) excluded by default, per contact 45 s gap and 6 per hour, 30 per hour total, paused during calls. The daemon has no HTTP message event, so it polls `/api/friends-list` every 15 s. Disable with `BVA_TEXT_AUTOREPLY=0`.
+- Tests: `tests/asr-recordings.js` (saved recordings through the real receive path), `tests/latency-e2e.js` (real-time end-to-end), `PYTHONPATH=. .venv/bin/python -m unittest tests/test_local_policy.py`.
+
+## 2026-11-10 bilingual call mode
+
+- `language_mode.py`: per-call sticky language. Asking for Chinese ("speak Chinese", "说中文", "中文"…) or two consecutive zh turns locks the call to zh: recognizer forced to zh with a Simplified-Chinese Beagle prompt, replies only in Simplified Chinese (OpenCC t2s), Chinese TTS. "Speak English"/"说英文" switches back (a badly decoded locked turn gets one decode in the other language to catch it). Unlocked turns are restricted to en/zh: any other script (Cyrillic, kana, Hangul…) is re-decoded as zh.
+- Generic model refusals ("I'm sorry, but I can't assist with that.") are replaced: low-confidence input gets "didn't catch that, please say it again" in the call language, otherwise a short in-language Beagle-only refusal. Language requests are always acknowledged, never refused.
+- Optional `BVA_ZH_MODEL=whisper-small` (in `models/whisper-small`) for zh-locked turns: about +480 ms recognition, off by default.
+- Scenario test: `node tests/zh-scenario.js . <label>`.
 
 ## Local/offline tests (never call anyone)
 
@@ -95,3 +110,22 @@ Changes:
 Additional checks: `node tests/quality-integration.js` and `.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`. Existing half-duplex echo gate remains; no barge-in. Longer/noisy turns or bilingual fallback decoding can still take longer. The installed SDK Socket.IO/push bridge and relay-only UDP media are unchanged.
 
 No automatic outgoing call is made when starting `./run-conversation.sh` without flags. The optional `--offline-call <accepted-userid>` initiates one real call and therefore needs fresh user authorization. Do not reuse an old command containing that flag merely to restart the listener.
+
+## Voice messages (语音消息)
+
+Voice-note auto-reply lives in `lib/voicenote.js` and `TextAutoReply.handleVoice` (`lib/text-autoreply.js`). Disable with `BVA_VOICE_AUTOREPLY=0`.
+
+* **Arrive as** ordinary chat file messages named `voice-<epochMs>-<durationMs>.m4a` (Beagle iOS: AAC-LC, 24 kHz mono, ~32 kbit/s). The daemon stores them in `beagle-id/downloads/`; we read them via `/api/file-download?name=` and check the size. `friends-list.lastMessage` has no file field, so the poller fetches the thread.
+* **Who and when:** same accepted-friend allowlist, backlog baseline (no replies to messages from before start), agent exclusions (Decent HQ, muse by default), and call-pause as text auto-reply. The daemon has no HTTP message event, so the poller hits `/api/friends-list` every 15 s. Rate limits: 45 s gap and 6 replies/hour per contact, 30/hour total.
+* **Pipeline:** ffmpeg decodes the note to 16 kHz mono PCM; the local worker (`op: voicenote`) transcribes the whole note with faster-whisper (≤120 s, en/zh only, simplified), then generates a short reply (≤2 sentences) with local Qwen2.5-1.5B via llama.cpp, or a fixed FAQ/policy answer when that applies; Piper synthesizes speech; ffmpeg encodes AAC-LC 24 kHz mono 32k `.m4a` (+faststart) named `voice-<nowMs>-<durMs>.m4a`. Incoming audio is saved to `out/voicenotes/<peer8>-<name>`.
+* **Send:** `POST /api/file-send?userid=&name=` through the Beagle CLI daemon at `http://localhost:8766`. If that fails, the same reply is sent as text via `/api/chat-send` (`VOICE_AUTOREPLY_VOICE_FAILED`). Logs: `VOICE_NOTE_TRANSCRIPT`, `VOICE_AUTOREPLY_SENT`.
+* One-off owner-approved reply to a specific message: `node tools/reply-one-voicenote.js <peer> <messageId>`.
+* Tests: `node tests/voicenote-integration.js` (real saved note + locked-language, summary, voice-call and deadline regressions).
+
+## Turn deadlines
+* Worker: `BVA_LLM_FIRST_MS` (4000) to the first model text and `BVA_LLM_TOTAL_MS` (9000) overall, 2 s socket timeouts;
+  no text in time → "不好意思，我卡了一下，请再说一遍。" / "Sorry, I got stuck for a second. Please say that again."
+* Node: `BVA_TURN_WATCHDOG_MS` (7000): if nothing at all comes back (whole-host stall) a pre-synthesized fallback plays,
+  the turn is freed and the late result is dropped (`TURN_WATCHDOG`).
+* Locked zh calls: English input gets a Chinese answer (prefix prompt; if the model still answers in English the reply is
+  translated); "who are you / 你是谁" has a fixed answer; fixed replies follow the lock language.

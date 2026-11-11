@@ -6,15 +6,16 @@ import {LocalBackend} from './lib/local-backend.js';
 import {ConversationSession} from './lib/conversation.js';
 import {CombinedSignaling} from './lib/offline-signaling.js';
 import {CallBudget} from './lib/call-budget.js';
+import {TextAutoReply} from './lib/text-autoreply.js';
 import fs from 'node:fs';
 import path from 'node:path';
 const base=process.env.BEAGLE_URL||'http://localhost:8766';
 const log=(...a)=>console.log(new Date().toISOString(),...a);
-const backend=new LocalBackend({log}); let engine,signaling,active=null,session=null;const mediaPCs=new Set();
+const backend=new LocalBackend({log}); let engine,signaling,active=null,session=null,texter=null;const mediaPCs=new Set();
 const budget=new CallBudget(id=>{if(active!==id)return;log('HARD_THREE_MINUTE_LIMIT',id);session?.close();for(const pc of mediaPCs)void pc.close();mediaPCs.clear();void engine.hangup(id).catch(e=>log('hangup failed',e.message));session=null;active=null;status();});
 const statusPath=path.join(path.dirname(new URL(import.meta.url).pathname),'out/conversation-status.json');
 function status(ready=true){const tmp=statusPath+'.tmp';fs.writeFileSync(tmp,JSON.stringify({pid:process.pid,ready,activeCall:active,profile:process.env.BVA_PROFILE||'fast',updatedAt:new Date().toISOString()}));fs.renameSync(tmp,statusPath);}
-async function shutdown(){status(false);budget.stop();session?.close();if(active)await engine?.hangup(active).catch(()=>{});signaling?.stop();backend.close();process.exit(0);}
+async function shutdown(){status(false);texter?.stop();budget.stop();session?.close();if(active)await engine?.hangup(active).catch(()=>{});signaling?.stop();backend.close();process.exit(0);}
 process.on('SIGINT',shutdown);process.on('SIGTERM',shutdown);
 try {
  await backend.ready;
@@ -34,7 +35,9 @@ try {
   try {
    // Refresh permission at call time: revoked friends cannot use a stale startup allowlist.
    const current=await fetch(base+'/api/friends-list',{signal:AbortSignal.timeout(5000)}).then(r=>{if(!r.ok)throw new Error('friend permission unavailable');return r.json();});
-   if(!(current.friends||[]).some(f=>f.userid===info.peerId&&f.accepted===true))throw new Error('caller is not an accepted friend');
+   const accepted=(current.friends||[]).filter(f=>f.accepted===true);
+   log('friends reloaded for call',JSON.stringify({accepted:accepted.length}));
+   if(!accepted.some(f=>f.userid===info.peerId))throw new Error('caller is not an accepted friend');
    if(active!==key)return engine.reject(info.callId);
    session=new ConversationSession({src,backend,log,peerId:info.peerId});
    log('answering accepted friend',info.peerId,info.callId);
@@ -44,7 +47,17 @@ try {
  engine.on('remoteStream',(id,stream)=>{if(id.toLowerCase()===active)for(const track of stream.getAudioTracks())session?.attach(track);});
  engine.on('ended',(id,why)=>{if(id.toLowerCase()===active){log('call ended',why,'remoteDecodedPackets',session?.receivedPackets||0,'socketAnswerReceived',signaling.answers.has(active));budget.stop();session?.close();session=null;active=null;budget.stop();status();}});
  engine.on('stateChanged',(info,state)=>log('state',info.callId,state));
- status();log('READY: local bilingual conversation listener; accepted friends',friends.size,'half duplex','profile',process.env.BVA_PROFILE||'fast');
+ status();log('READY: local bilingual conversation listener; accepted friends',friends.size,'(reloaded on every incoming call) half duplex, streamed replies, profile',process.env.BVA_PROFILE||'fast');
+ try{const [en,zh]=await Promise.all([["en","Sorry, give me a second. Please say that again."],["zh","不好意思，我卡了一下，请再说一遍。"]].map(([,t])=>backend.request({op:'tts',text:t})));ConversationSession.fallbackWavs={en:en.wav,zh:zh.wav};log('watchdog fallback lines ready',ConversationSession.watchdogMs+'ms');}catch(e){log('watchdog fallback synth failed',e.message);}
+ if(process.env.BVA_TEXT_AUTOREPLY!=='0'){
+  // Agent contacts are excluded by default so two bots can never loop on each other.
+  const names=process.env.BVA_TEXT_AUTOREPLY_EXCLUDE_NAMES??'Decent HQ|muse';
+  texter=new TextAutoReply({base,backend,log,isBusy:()=>!!active,intervalMs:+(process.env.BVA_TEXT_POLL_MS||15000),
+   excludeIds:(process.env.BVA_TEXT_AUTOREPLY_EXCLUDE_IDS||'').split(',').filter(Boolean),excludeNames:names?new RegExp(names,'i'):null,
+   // Voice messages (语音消息): same allowlist/limits; incoming audio is kept for testing.
+   voice:process.env.BVA_VOICE_AUTOREPLY!=='0',voiceTools:{save:async(name,buf)=>{const dir=path.resolve('out/voicenotes');fs.mkdirSync(dir,{recursive:true});const p=path.join(dir,name.replace(/[^\w.-]/g,'_'));if(!fs.existsSync(p))fs.writeFileSync(p,buf);return path.relative(process.cwd(),p);}}});
+  try{await texter.start();}catch(e){log('TEXT_AUTOREPLY_START_FAILED',e.message);texter=null;}
+ } else log('TEXT_AUTOREPLY disabled by BVA_TEXT_AUTOREPLY=0');
  const i=process.argv.indexOf('--offline-call');
  if(i>=0){
   const peer=process.argv[i+1];if(!friends.has(peer))throw new Error('outbound target is not an accepted friend');

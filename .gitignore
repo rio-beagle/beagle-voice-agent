@@ -8,3 +8,22 @@ out/
 runtime/
 *.log
 .env
+
+# Audio recordings and generated speech (existing tracked test fixtures remain)
+*.m4a
+*.wav
+*.ogg
+*.oga
+*.opus
+*.aac
+*.caf
+*.amr
+*.mp3
+*.flac
+
+# Identity / secrets (belt and braces; .env already ignored)
+*.pem
+*.key
+*.p12
+id_rsa
+id_ed25519
